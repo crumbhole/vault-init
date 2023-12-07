@@ -1,6 +1,6 @@
 # vault-init
 
-This is a fork of [sethvargo/vault-init](https://github.com/sethvargo/vault-init) via liatrio with the following key differences:
+This is a fork of [sethvargo/vault-init](https://github.com/sethvargo/vault-init) via [liatrio/vault-init](https://github.com/liatrio/vault-init) with the following key differences:
 
 - Root token and unseal keys are stored within a Kubernetes Secret instead of Google Cloud Storage, and completely unencrypted
 
