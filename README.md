@@ -1,9 +1,8 @@
 # vault-init
 
-This is a fork of [sethvargo/vault-init](https://github.com/sethvargo/vault-init) with the following key differences:
+This is a fork of [sethvargo/vault-init](https://github.com/sethvargo/vault-init) via liatrio with the following key differences:
 
-- Root token and unseal keys are encrypted / decrypted with AWS KMS instead of Google Cloud KMS
-- Encrypted root token and unseal keys are stored within a Kubernetes Secret instead of Google Cloud Storage
+- Root token and unseal keys are stored within a Kubernetes Secret instead of Google Cloud Storage, and completely unencrypted
 
 ## Usage
 
@@ -14,7 +13,7 @@ You can download the code and compile the binary with Go. Alternatively, a
 Docker container is available via the Docker Hub:
 
 ```text
-$ docker pull ghcr.io/liatrio/vault-init
+$ docker pull ghcr.io/crumbhole/vault-init
 ```
 
 To use this as part of a Kubernetes Vault Deployment:
@@ -22,15 +21,11 @@ To use this as part of a Kubernetes Vault Deployment:
 ```yaml
 containers:
 - name: vault-init
-  image: ghcr.io/liatrio/vault-init:latest
+  image: ghcr.io/crumbhole/vault-init:latest
   imagePullPolicy: Always
   env:
   - name: K8S_SECRET_NAME
     value: my-k8s-secret
-  - name: KMS_KEY_ID
-    value: arn:aws:kms:us-east-1:112233445566:key/f30464ff-5082-453b-8604-463c07d86d27
-  - name: KMS_REGION
-    value: us-east-1
 ```
 
 You can also use this alongside the official Vault Helm chart:
@@ -39,15 +34,11 @@ You can also use this alongside the official Vault Helm chart:
 server:
   extraContainers:
     - name: vault-init
-      image: ghcr.io/liatrio/vault-init:latest
+      image: ghcr.io/crumbhole/vault-init:latest
       imagePullPolicy: Always
       env:
         - name: K8S_SECRET_NAME
           value: my-k8s-secret
-        - name: KMS_KEY_ID
-          value: arn:aws:kms:us-east-1:112233445566:key/f30464ff-5082-453b-8604-463c07d86d27
-        - name: KMS_REGION
-          value: us-east-1
 ```
 
 ## Configuration
@@ -59,11 +50,6 @@ The `vault-init` service supports the following environment variables for config
 
 - `K8S_SECRET_NAME` - The Kubernetes secret where the Vault master key
   and root token is stored. The secret will be created in the same namespace as the Vault server pod.
-
-- `KMS_KEY_ID` - The AWS KMS key ID used to encrypt and decrypt the
-  vault master key and root token.
-
-- `KMS_REGION` - The region in which the AWS KMS key exists 
 
 - `VAULT_SECRET_SHARES` (5) - The number of human shares to create.
 
@@ -95,29 +81,7 @@ The `vault-init` service supports the following environment variables for config
 
 ### IAM &amp; Permissions
 
-The `vault-init` service uses the official AWS Golang SDK. This means
-it supports the common ways of [providing credentials to AWS](https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials).
-
-To use this service, the AWS service account must have the following permissions:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Action": [
-        "kms:Encrypt",
-        "kms:Decrypt",
-        "kms:DescribeKey"
-      ],
-      "Effect": "Allow",
-      "Resource": "my-aws-kms-key-arn"
-    }
-  ]
-}
-```
-
-Additionally, Kubernetes service account for Vault needs to be able to create secrets, and read/update the desired secret
+The Kubernetes service account for Vault needs to be able to create secrets, and read/update the desired secret
 if it already exists.  The following role can be used:
 
 ```yaml

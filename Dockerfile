@@ -1,6 +1,6 @@
-FROM golang:1.15 AS builder
+FROM golang:1.21 AS builder
 
-RUN apt-get -qq update && apt-get -yqq install upx
+RUN apt-get -qq update
 
 ENV GO111MODULE=on \
   CGO_ENABLED=0 \
@@ -17,12 +17,6 @@ RUN go build \
   -tags 'osusergo netgo static_build' \
   -o /bin/vault-init \
   .
-
-RUN strip /bin/vault-init
-RUN upx -q -9 /bin/vault-init
-
-
-
 
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

@@ -24,10 +24,10 @@ changelog:
       - '^test:'
 dockers:
   - image_templates:
-      - "ghcr.io/liatrio/vault-init:latest"
-      - "ghcr.io/liatrio/vault-init:{{ .Tag }}"
-      - "ghcr.io/liatrio/vault-init:v{{ .Major }}"
-      - "ghcr.io/liatrio/vault-init:v{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/crumbhole/vault-init:latest"
+      - "ghcr.io/crumbhole/vault-init:{{ .Tag }}"
+      - "ghcr.io/crumbhole/vault-init:v{{ .Major }}"
+      - "ghcr.io/crumbhole/vault-init:v{{ .Major }}.{{ .Minor }}"
     extra_files:
       - "go.mod"
       - "go.sum"

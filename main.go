@@ -11,10 +11,9 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,9 +26,6 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/kms"
 	"time"
 )
 
@@ -42,10 +38,6 @@ var (
 	vaultStoredShares      int
 	vaultRecoveryShares    int
 	vaultRecoveryThreshold int
-
-	kmsKeyId  string
-	kmsRegion string
-	kmsSvc    *kms.KMS
 
 	k8sClient     *kubernetes.Clientset
 	k8sSecretName string
@@ -119,16 +111,6 @@ func main() {
 		log.Fatal("K8S_SECRET_NAME must be set and not empty")
 	}
 
-	kmsKeyId = os.Getenv("KMS_KEY_ID")
-	if kmsKeyId == "" {
-		log.Fatal("KMS_KEY_ID must be set and not empty")
-	}
-
-	kmsRegion = os.Getenv("KMS_REGION")
-	if kmsKeyId == "" {
-		log.Fatal("KMS_REGION must be set and not empty")
-	}
-
 	var clusterConfig *rest.Config
 	clusterConfig, err = rest.InClusterConfig()
 	if err != nil {
@@ -144,16 +126,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("error getting current namespace: %v", err)
 	}
-
-	var sess *session.Session
-	sess, err = session.NewSession(&aws.Config{
-		Region: aws.String(kmsRegion),
-	})
-	if err != nil {
-		log.Fatalf("error creating AWS session: %v", err)
-	}
-
-	kmsSvc = kms.New(sess)
 
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: vaultInsecureSkipVerify,
@@ -262,7 +234,7 @@ func initialize() {
 	}
 	defer response.Body.Close()
 
-	initRequestResponseBody, err := ioutil.ReadAll(response.Body)
+	initRequestResponseBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		log.Println(err)
 		return
@@ -282,24 +254,6 @@ func initialize() {
 
 	log.Println("Encrypting unseal keys and the root token...")
 
-	rootTokenEncryptResult, err := kmsSvc.Encrypt(&kms.EncryptInput{
-		KeyId:     aws.String(kmsKeyId),
-		Plaintext: []byte(initResponse.RootToken),
-	})
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	unsealKeysEncryptResult, err := kmsSvc.Encrypt(&kms.EncryptInput{
-		KeyId:     aws.String(kmsKeyId),
-		Plaintext: initRequestResponseBody,
-	})
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
 	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(context.Background(), k8sSecretName, metav1.GetOptions{})
 	if err != nil && errors.IsNotFound(err) { // secret doesn't exist, we need to create
 		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Create(context.Background(), &v1.Secret{
@@ -308,8 +262,8 @@ func initialize() {
 				Namespace: k8sNamespace,
 			},
 			Data: map[string][]byte{
-				"unseal-keys.json.enc": unsealKeysEncryptResult.CiphertextBlob,
-				"root-token.enc":       rootTokenEncryptResult.CiphertextBlob,
+				"rootToken": []byte(initResponse.RootToken),
+				"unsealKeys": initRequestResponseBody,
 			},
 		}, metav1.CreateOptions{})
 		if err != nil {
@@ -317,8 +271,8 @@ func initialize() {
 			return
 		}
 	} else if err == nil { // secret exists, we need to update
-		secret.Data["unseal-keys.json.enc"] = unsealKeysEncryptResult.CiphertextBlob
-		secret.Data["root-token.enc"] = rootTokenEncryptResult.CiphertextBlob
+		secret.Data["rootToken"] = []byte(initResponse.RootToken)
+		secret.Data["unsealKeys"] = initRequestResponseBody
 
 		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Update(context.Background(), secret, metav1.UpdateOptions{})
 		if err != nil {
@@ -344,32 +298,11 @@ func unseal() {
 		return
 	}
 
-	unsealKeysBytes, ok := secret.Data["unseal-keys.json.enc"]
-	if !ok {
-		log.Printf("secret %s/%s does not contain unseal keys\n", k8sNamespace, k8sSecretName)
-		return
-	}
-
-	unsealKeys, err := base64.StdEncoding.DecodeString(string(unsealKeysBytes))
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	unsealKeysDecryptResult, err := kmsSvc.Decrypt(&kms.DecryptInput{
-		KeyId:          aws.String(kmsKeyId),
-		CiphertextBlob: unsealKeys,
-	})
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
 	var initResponse InitResponse
 
-	unsealKeysPlaintext, err := base64.StdEncoding.DecodeString(string(unsealKeysDecryptResult.Plaintext))
-	if err != nil {
-		log.Println(err)
+	unsealKeysPlaintext, ok := secret.Data["unsealKeys"]
+	if !ok {
+		log.Printf("secret %s/%s does not contain unseal keys\n", k8sNamespace, k8sSecretName)
 		return
 	}
 
@@ -417,7 +350,7 @@ func unsealOne(key string) (bool, error) {
 		return false, fmt.Errorf("unseal: non-200 status code: %d", response.StatusCode)
 	}
 
-	unsealRequestResponseBody, err := ioutil.ReadAll(response.Body)
+	unsealRequestResponseBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		return false, err
 	}
@@ -439,7 +372,7 @@ func processTLSConfig(cfg *tls.Config, serverName, caCert, caPath string) error 
 
 	// If a CA cert is provided, trust only that cert
 	if caCert != "" {
-		b, err := ioutil.ReadFile(caCert)
+		b, err := os.ReadFile(caCert)
 		if err != nil {
 			return fmt.Errorf("failed to read CA cert: %w", err)
 		}
@@ -455,7 +388,7 @@ func processTLSConfig(cfg *tls.Config, serverName, caCert, caPath string) error 
 
 	// If a directory is provided, trust only the certs in that directory
 	if caPath != "" {
-		files, err := ioutil.ReadDir(caPath)
+		files, err := os.ReadDir(caPath)
 		if err != nil {
 			return fmt.Errorf("failed to read CA path: %w", err)
 		}
@@ -463,7 +396,7 @@ func processTLSConfig(cfg *tls.Config, serverName, caCert, caPath string) error 
 		root := x509.NewCertPool()
 
 		for _, f := range files {
-			b, err := ioutil.ReadFile(f.Name())
+			b, err := os.ReadFile(f.Name())
 			if err != nil {
 				return fmt.Errorf("failed to read cert: %w", err)
 			}
@@ -528,7 +461,7 @@ func durFromEnv(env string, def time.Duration) time.Duration {
 }
 
 func getCurrentNamespace() (string, error) {
-	b, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	if err != nil {
 		return "", err
 	}
