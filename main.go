@@ -75,6 +75,7 @@ type UnsealResponse struct {
 }
 
 func main() {
+	ctx := context.Background()
 	log.Println("Starting the vault-init service...")
 
 	var err error
@@ -128,6 +129,7 @@ func main() {
 	}
 
 	tlsConfig := &tls.Config{
+		//#nosec G402: Yes, this is insecure
 		InsecureSkipVerify: vaultInsecureSkipVerify,
 	}
 	if err := processTLSConfig(tlsConfig, vaultServerName, vaultCaCert, vaultCaPath); err != nil {
@@ -168,23 +170,23 @@ func main() {
 		}
 
 		switch response.StatusCode {
-		case 200:
+		case http.StatusOK:
 			log.Println("Vault is initialized and unsealed.")
-		case 429:
+		case http.StatusTooManyRequests:
 			log.Println("Vault is unsealed and in standby mode.")
-		case 501:
+		case http.StatusNotImplemented:
 			log.Println("Vault is not initialized.")
 			log.Println("Initializing...")
-			initialize()
+			initialize(ctx)
 			if !vaultAutoUnseal {
 				log.Println("Unsealing...")
-				unseal()
+				unseal(ctx)
 			}
-		case 503:
+		case http.StatusServiceUnavailable:
 			log.Println("Vault is sealed.")
 			if !vaultAutoUnseal {
 				log.Println("Unsealing...")
-				unseal()
+				unseal(ctx)
 			}
 		default:
 			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
@@ -205,7 +207,7 @@ func main() {
 	}
 }
 
-func initialize() {
+func initialize(ctx context.Context) {
 	initRequest := InitRequest{
 		SecretShares:      vaultSecretShares,
 		SecretThreshold:   vaultSecretThreshold,
@@ -221,7 +223,7 @@ func initialize() {
 	}
 
 	r := bytes.NewReader(initRequestData)
-	request, err := http.NewRequest("PUT", vaultAddr+"/v1/sys/init", r)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, vaultAddr+"/v1/sys/init", r)
 	if err != nil {
 		log.Println(err)
 		return
@@ -240,7 +242,7 @@ func initialize() {
 		return
 	}
 
-	if response.StatusCode != 200 {
+	if response.StatusCode != http.StatusOK {
 		log.Printf("init: non 200 status code: %d", response.StatusCode)
 		return
 	}
@@ -254,15 +256,16 @@ func initialize() {
 
 	log.Println("Encrypting unseal keys and the root token...")
 
-	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(context.Background(), k8sSecretName, metav1.GetOptions{})
-	if err != nil && errors.IsNotFound(err) { // secret doesn't exist, we need to create
-		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Create(context.Background(), &v1.Secret{
+	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(ctx, k8sSecretName, metav1.GetOptions{})
+	switch {
+	case err != nil && errors.IsNotFound(err): // secret doesn't exist, we need to create
+		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Create(ctx, &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      k8sSecretName,
 				Namespace: k8sNamespace,
 			},
 			Data: map[string][]byte{
-				"rootToken": []byte(initResponse.RootToken),
+				"rootToken":  []byte(initResponse.RootToken),
 				"unsealKeys": initRequestResponseBody,
 			},
 		}, metav1.CreateOptions{})
@@ -270,16 +273,16 @@ func initialize() {
 			log.Println(err)
 			return
 		}
-	} else if err == nil { // secret exists, we need to update
+	case err == nil: // secret exists, we need to update
 		secret.Data["rootToken"] = []byte(initResponse.RootToken)
 		secret.Data["unsealKeys"] = initRequestResponseBody
 
-		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Update(context.Background(), secret, metav1.UpdateOptions{})
+		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Update(ctx, secret, metav1.UpdateOptions{})
 		if err != nil {
 			log.Println(err)
 			return
 		}
-	} else {
+	default:
 		log.Println(err)
 		return
 	}
@@ -289,9 +292,7 @@ func initialize() {
 	log.Println("Initialization complete.")
 }
 
-func unseal() {
-	ctx := context.Background()
-
+func unseal(ctx context.Context) {
 	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(ctx, k8sSecretName, metav1.GetOptions{})
 	if err != nil {
 		log.Println(err)
@@ -312,7 +313,7 @@ func unseal() {
 	}
 
 	for _, key := range initResponse.KeysBase64 {
-		done, err := unsealOne(key)
+		done, err := unsealOne(ctx, key)
 		if done {
 			return
 		}
@@ -324,7 +325,7 @@ func unseal() {
 	}
 }
 
-func unsealOne(key string) (bool, error) {
+func unsealOne(ctx context.Context, key string) (bool, error) {
 	unsealRequest := UnsealRequest{
 		Key: key,
 	}
@@ -335,7 +336,7 @@ func unsealOne(key string) (bool, error) {
 	}
 
 	r := bytes.NewReader(unsealRequestData)
-	request, err := http.NewRequest(http.MethodPut, vaultAddr+"/v1/sys/unseal", r)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, vaultAddr+"/v1/sys/unseal", r)
 	if err != nil {
 		return false, err
 	}
@@ -346,7 +347,7 @@ func unsealOne(key string) (bool, error) {
 	}
 	defer response.Body.Close()
 
-	if response.StatusCode != 200 {
+	if response.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("unseal: non-200 status code: %d", response.StatusCode)
 	}
 
@@ -451,7 +452,7 @@ func durFromEnv(env string, def time.Duration) time.Duration {
 	}
 	r := val[len(val)-1]
 	if r >= '0' || r <= '9' {
-		val = val + "s" // assume seconds
+		val += "s" // assume seconds
 	}
 	d, err := time.ParseDuration(val)
 	if err != nil {
