@@ -3,5 +3,12 @@
   "extends": [
     "config:base"
   ],
-  "includeForks": true
+  "includeForks": true,
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchCurrentVersion": "!/^0/",
+      "automerge": true
+    }
+  ]
 }
