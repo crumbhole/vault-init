@@ -173,28 +173,7 @@ func runner(ctx context.Context, checkInterval time.Duration, vaultAutoUnseal bo
 			continue
 		}
 
-		switch response.StatusCode {
-		case http.StatusOK:
-			log.Println("Vault is initialized and unsealed.")
-		case http.StatusTooManyRequests:
-			log.Println("Vault is unsealed and in standby mode.")
-		case http.StatusNotImplemented:
-			log.Println("Vault is not initialized.")
-			log.Println("Initializing...")
-			initialize(ctx)
-			if !vaultAutoUnseal {
-				log.Println("Unsealing...")
-				unseal(ctx)
-			}
-		case http.StatusServiceUnavailable:
-			log.Println("Vault is sealed.")
-			if !vaultAutoUnseal {
-				log.Println("Unsealing...")
-				unseal(ctx)
-			}
-		default:
-			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
-		}
+		handleResponseCode(ctx, response.StatusCode, vaultAutoUnseal)
 
 		if checkInterval <= 0 {
 			log.Printf("Check interval set to less than 0, exiting.")
@@ -208,6 +187,31 @@ func runner(ctx context.Context, checkInterval time.Duration, vaultAutoUnseal bo
 			stop()
 		case <-time.After(checkInterval):
 		}
+	}
+}
+
+func handleResponseCode(ctx context.Context, code int, vaultAutoUnseal bool) {
+	switch code {
+	case http.StatusOK:
+		log.Println("Vault is initialized and unsealed.")
+	case http.StatusTooManyRequests:
+		log.Println("Vault is unsealed and in standby mode.")
+	case http.StatusNotImplemented:
+		log.Println("Vault is not initialized.")
+		log.Println("Initializing...")
+		initialize(ctx)
+		if !vaultAutoUnseal {
+			log.Println("Unsealing...")
+			unseal(ctx)
+		}
+	case http.StatusServiceUnavailable:
+		log.Println("Vault is sealed.")
+		if !vaultAutoUnseal {
+			log.Println("Unsealing...")
+			unseal(ctx)
+		}
+	default:
+		log.Printf("Vault is in an unknown state. Status code: %d", code)
 	}
 }
 
