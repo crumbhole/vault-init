@@ -143,6 +143,10 @@ func main() {
 		},
 	}
 
+	runner(ctx, checkInterval, vaultAutoUnseal)
+}
+
+func runner(ctx context.Context, checkInterval time.Duration, vaultAutoUnseal bool) {
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
 
