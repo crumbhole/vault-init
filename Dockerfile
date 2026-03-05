@@ -1,9 +1,9 @@
-FROM golang:1.24 AS builder
+FROM golang:1.26 AS builder
 
 RUN apt-get -qq update
 
 ENV GO111MODULE=on \
-  CGO_ENABLED=0 
+  CGO_ENABLED=0
 
 WORKDIR /src
 
