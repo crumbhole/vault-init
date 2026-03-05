@@ -34,7 +34,6 @@ linters:
     - reassign
     - revive
     - sqlclosecheck
-    - stylecheck
     # - tagliatelle
     - thelper
     - unconvert
