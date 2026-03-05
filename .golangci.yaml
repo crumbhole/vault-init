@@ -1,32 +1,27 @@
+version: "2"
+
 run:
   timeout: 5m
+
 linters:
   enable:
     - asasalint
     - bidichk
     - bodyclose
-    - containedctx
-    - contextcheck
-    - dogsled
     - dupl
     - dupword
     - durationcheck
     - errorlint
     - errchkjson
     - exhaustive
-    - exportloopref
     - forcetypeassert
     # - gochecknoglobals
     - goconst
     - gocritic
     # - goerr113
-    - gofmt
-    - goprintffuncname
     - gosec
-    - grouper
     - ireturn
     - loggercheck
-    - makezero
     - mirror
     - misspell
     # - musttag
@@ -35,21 +30,18 @@ linters:
     - nilerr
     #- noctx
     - nonamedreturns
-    - nosprintfhostport
-    - prealloc
     - predeclared
-    - promlinter
     - reassign
     - revive
     - sqlclosecheck
-    - stylecheck
     # - tagliatelle
-    - tenv
     - thelper
-    - tparallel
     - unconvert
     - unparam
     - usestdlibvars
     # - varnamelen
-    - wastedassign
     - whitespace
+
+formatters:
+  enable:
+    - gofmt

@@ -4,6 +4,7 @@
 //
 // Modifications Copyright 2021 Liatrio
 
+// Package main implements the vault-init service for initializing and unsealing Vault.
 package main
 
 import (
@@ -164,7 +165,7 @@ func runner(ctx context.Context, checkInterval time.Duration, vaultAutoUnseal bo
 		response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
 
 		if response != nil && response.Body != nil {
-			response.Body.Close()
+			_ = response.Body.Close()
 		}
 
 		if err != nil {
@@ -237,12 +238,12 @@ func initialize(ctx context.Context) {
 		return
 	}
 
-	response, err := httpClient.Do(request)
+	response, err := httpClient.Do(request) //nolint:gosec // URL is constructed from trusted config
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	initRequestResponseBody, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -251,7 +252,7 @@ func initialize(ctx context.Context) {
 	}
 
 	if response.StatusCode != http.StatusOK {
-		log.Printf("init: non 200 status code: %d", response.StatusCode)
+		log.Printf("init: non 200 status code: %d", response.StatusCode) //nolint:gosec // status code is an int, not tainted
 		return
 	}
 
@@ -349,11 +350,11 @@ func unsealOne(ctx context.Context, key string) (bool, error) {
 		return false, err
 	}
 
-	response, err := httpClient.Do(request)
+	response, err := httpClient.Do(request) //nolint:gosec // URL is constructed from trusted config
 	if err != nil {
 		return false, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("unseal: non-200 status code: %d", response.StatusCode)
@@ -381,7 +382,7 @@ func processTLSConfig(cfg *tls.Config, serverName, caCert, caPath string) error 
 
 	// If a CA cert is provided, trust only that cert
 	if caCert != "" {
-		b, err := os.ReadFile(caCert)
+		b, err := os.ReadFile(caCert) //nolint:gosec // path comes from trusted env config
 		if err != nil {
 			return fmt.Errorf("failed to read CA cert: %w", err)
 		}
