@@ -15,19 +15,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
-
 	"time"
+
+	"filippo.io/age"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 var (
@@ -40,9 +41,14 @@ var (
 	vaultRecoveryShares    int
 	vaultRecoveryThreshold int
 
-	k8sClient     *kubernetes.Clientset
-	k8sSecretName string
-	k8sNamespace  string
+	secretDir      string
+	ageRecipients  []age.Recipient
+	secretFilePath string
+
+	k8sClient              *kubernetes.Clientset
+	k8sNamespace           string
+	ageIdentitiesSecretName string
+	ageIdentitiesSecretKey  string
 )
 
 // InitRequest holds a Vault init request.
@@ -79,8 +85,6 @@ func main() {
 	ctx := context.Background()
 	log.Println("Starting the vault-init service...")
 
-	var err error
-
 	vaultAddr = os.Getenv("VAULT_ADDR")
 	if vaultAddr == "" {
 		vaultAddr = "https://127.0.0.1:8200"
@@ -108,12 +112,51 @@ func main() {
 
 	checkInterval := durFromEnv("CHECK_INTERVAL", 10*time.Second)
 
-	k8sSecretName = os.Getenv("K8S_SECRET_NAME")
-	if k8sSecretName == "" {
-		log.Fatal("K8S_SECRET_NAME must be set and not empty")
+	// Get secret directory from environment
+	secretDir = os.Getenv("SECRET_DIR")
+	if secretDir == "" {
+		log.Fatal("SECRET_DIR must be set and not empty")
 	}
 
+	// Get age recipients from environment
+	recipientsStr := os.Getenv("AGE_RECIPIENTS")
+	if recipientsStr == "" {
+		log.Fatal("AGE_RECIPIENTS must be set and not empty")
+	}
+
+	// Parse age recipients (comma-separated list of public keys)
+	recipientsList := strings.Split(recipientsStr, ",")
+	ageRecipients = make([]age.Recipient, 0, len(recipientsList))
+	for _, recipientStr := range recipientsList {
+		recipientStr = strings.TrimSpace(recipientStr)
+		if recipientStr == "" {
+			continue
+		}
+		recipient, err := age.ParseX25519Recipient(recipientStr)
+		if err != nil {
+			log.Fatalf("failed to parse age recipient %q: %v", recipientStr, err)
+		}
+		ageRecipients = append(ageRecipients, recipient)
+	}
+
+	if len(ageRecipients) == 0 {
+		log.Fatal("at least one valid age recipient must be provided")
+	}
+
+	// Get Kubernetes secret name for AGE_IDENTITIES (required)
+	ageIdentitiesSecretName = os.Getenv("AGE_IDENTITIES_SECRET_NAME")
+	if ageIdentitiesSecretName == "" {
+		log.Fatal("AGE_IDENTITIES_SECRET_NAME must be set and not empty")
+	}
+
+	ageIdentitiesSecretKey = os.Getenv("AGE_IDENTITIES_SECRET_KEY")
+	if ageIdentitiesSecretKey == "" {
+		ageIdentitiesSecretKey = "identities" // default key name
+	}
+
+	// Initialize Kubernetes client
 	var clusterConfig *rest.Config
+	var err error
 	clusterConfig, err = rest.InClusterConfig()
 	if err != nil {
 		log.Fatalf("error fetching cluster config: %v", err)
@@ -128,6 +171,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("error getting current namespace: %v", err)
 	}
+
+	log.Printf("Will read AGE_IDENTITIES from secret %s/%s (key: %s)", k8sNamespace, ageIdentitiesSecretName, ageIdentitiesSecretKey)
+
+	// Ensure secret directory exists
+	if err := os.MkdirAll(secretDir, 0700); err != nil {
+		log.Fatalf("failed to create secret directory: %v", err)
+	}
+
+	secretFilePath = filepath.Join(secretDir, "vault-secrets.age")
 
 	tlsConfig := &tls.Config{
 		//#nosec G402: Yes, this is insecure
@@ -263,60 +315,29 @@ func initialize(ctx context.Context) {
 		return
 	}
 
-	log.Println("Encrypting unseal keys and the root token...")
+	log.Println("Encrypting unseal keys and the root token with age...")
 
-	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(ctx, k8sSecretName, metav1.GetOptions{})
-	switch {
-	case err != nil && errors.IsNotFound(err): // secret doesn't exist, we need to create
-		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Create(ctx, &v1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      k8sSecretName,
-				Namespace: k8sNamespace,
-			},
-			Data: map[string][]byte{
-				"rootToken":  []byte(initResponse.RootToken),
-				"unsealKeys": initRequestResponseBody,
-			},
-		}, metav1.CreateOptions{})
-		if err != nil {
-			log.Println(err)
-			return
-		}
-	case err == nil: // secret exists, we need to update
-		secret.Data["rootToken"] = []byte(initResponse.RootToken)
-		secret.Data["unsealKeys"] = initRequestResponseBody
-
-		_, err = k8sClient.CoreV1().Secrets(k8sNamespace).Update(ctx, secret, metav1.UpdateOptions{})
-		if err != nil {
-			log.Println(err)
-			return
-		}
-	default:
-		log.Println(err)
+	// Encrypt and save to filesystem
+	if err := encryptAndSaveSecrets(initRequestResponseBody); err != nil {
+		log.Printf("failed to encrypt and save secrets: %v", err)
 		return
 	}
 
-	log.Printf("Root token written to secret %s/%s", k8sNamespace, k8sSecretName)
-
+	log.Printf("Root token and unseal keys written to %s", secretFilePath)
 	log.Println("Initialization complete.")
 }
 
 func unseal(ctx context.Context) {
-	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(ctx, k8sSecretName, metav1.GetOptions{})
+	// Read and decrypt secrets from filesystem
+	initRequestResponseBody, err := readAndDecryptSecrets(ctx)
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to read and decrypt secrets: %v", err)
 		return
 	}
 
 	var initResponse InitResponse
 
-	unsealKeysPlaintext, ok := secret.Data["unsealKeys"]
-	if !ok {
-		log.Printf("secret %s/%s does not contain unseal keys\n", k8sNamespace, k8sSecretName)
-		return
-	}
-
-	if err := json.Unmarshal(unsealKeysPlaintext, &initResponse); err != nil {
+	if err := json.Unmarshal(initRequestResponseBody, &initResponse); err != nil {
 		log.Println(err)
 		return
 	}
@@ -375,6 +396,120 @@ func unsealOne(ctx context.Context, key string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// encryptAndSaveSecrets encrypts the vault secrets using age and saves them to the filesystem
+func encryptAndSaveSecrets(data []byte) error {
+	// Create a temporary file for atomic write
+	tmpFile := secretFilePath + ".tmp"
+
+	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+	}()
+
+	// Create age writer
+	w, err := age.Encrypt(f, ageRecipients...)
+	if err != nil {
+		return fmt.Errorf("failed to create age encryptor: %w", err)
+	}
+
+	// Write encrypted data
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("failed to write encrypted data: %w", err)
+	}
+
+	// Close the age writer to finalize encryption
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("failed to close age writer: %w", err)
+	}
+
+	// Close the file
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Atomically rename temp file to final location
+	if err := os.Rename(tmpFile, secretFilePath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
+// getAgeIdentities retrieves age identities from Kubernetes secret
+func getAgeIdentities(ctx context.Context) ([]age.Identity, error) {
+	// Get from Kubernetes secret
+	secret, err := k8sClient.CoreV1().Secrets(k8sNamespace).Get(ctx, ageIdentitiesSecretName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get secret %s/%s: %w", k8sNamespace, ageIdentitiesSecretName, err)
+	}
+
+	identitiesBytes, ok := secret.Data[ageIdentitiesSecretKey]
+	if !ok {
+		return nil, fmt.Errorf("secret %s/%s does not contain key %q", k8sNamespace, ageIdentitiesSecretName, ageIdentitiesSecretKey)
+	}
+
+	identitiesStr := string(identitiesBytes)
+	log.Printf("Retrieved AGE_IDENTITIES from secret %s/%s", k8sNamespace, ageIdentitiesSecretName)
+
+	// Parse age identities (comma-separated list of private keys)
+	identitiesList := strings.Split(identitiesStr, ",")
+	identities := make([]age.Identity, 0, len(identitiesList))
+	for _, identityStr := range identitiesList {
+		identityStr = strings.TrimSpace(identityStr)
+		if identityStr == "" {
+			continue
+		}
+		identity, err := age.ParseX25519Identity(identityStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse age identity: %w", err)
+		}
+		identities = append(identities, identity)
+	}
+
+	if len(identities) == 0 {
+		return nil, fmt.Errorf("at least one valid age identity must be provided")
+	}
+
+	return identities, nil
+}
+
+// readAndDecryptSecrets reads and decrypts the vault secrets from the filesystem
+func readAndDecryptSecrets(ctx context.Context) ([]byte, error) {
+	// Check if file exists
+	if _, err := os.Stat(secretFilePath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("secrets file does not exist: %s", secretFilePath)
+	}
+
+	// Read encrypted file
+	encryptedData, err := os.ReadFile(secretFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read secrets file: %w", err)
+	}
+
+	// Get age identities
+	identities, err := getAgeIdentities(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decrypt data
+	r, err := age.Decrypt(bytes.NewReader(encryptedData), identities...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt secrets: %w", err)
+	}
+
+	decryptedData, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read decrypted data: %w", err)
+	}
+
+	return decryptedData, nil
 }
 
 func processTLSConfig(cfg *tls.Config, serverName, caCert, caPath string) error {
