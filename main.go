@@ -595,7 +595,7 @@ func durFromEnv(env string, def time.Duration) time.Duration {
 		return def
 	}
 	r := val[len(val)-1]
-	if r >= '0' || r <= '9' {
+	if r >= '0' && r <= '9' {
 		val += "s" // assume seconds
 	}
 	d, err := time.ParseDuration(val)
